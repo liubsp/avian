@@ -30,8 +30,9 @@ fix is kept ready to be offered upstream as it stands.
 - One fix, one commit, with a message in upstream's terms (no fork issue numbers), so it can be
   offered upstream as it stands. Follow-ups to a fix are folded into its commit before it is
   pushed.
-- Each fix has an issue in this fork. Once the fix lands, the issue gets a comment naming its
-  commit and its tests: the issue maps the defect to its commit.
+- Each fix has an issue in this fork. Once the fix lands, the issue gets one comment naming its
+  commit and its tests: the issue maps the defect to its commit. When the fix or its commit
+  changes, edit that comment (and the issue text) instead of adding comments as a changelog.
 - The fork's own files are `AGENTS.md` and `CLAUDE.md`, in a commit of their own.
 - Upstream changes come in by merging upstream's `main` into ours, resolving conflicts in the
   merge.
