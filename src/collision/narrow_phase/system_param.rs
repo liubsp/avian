@@ -689,6 +689,18 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                             let delta_separation = com12 + (r2 - r1);
                             point.penetration =
                                 point.base_penetration - delta_separation.dot(manifold.normal);
+                            // The bodies' current approach at the point, for restitution. It is
+                            // measured at the kept anchors, where the solver applies the point's
+                            // impulses and measures the approach that restitution reverses.
+                            #[cfg(feature = "2d")]
+                            let relative_velocity = lin_vel2 - lin_vel1
+                                + ang_vel2 * point.anchor2.perp()
+                                - ang_vel1 * point.anchor1.perp();
+                            #[cfg(feature = "3d")]
+                            let relative_velocity = lin_vel2 - lin_vel1
+                                + ang_vel2.cross(point.anchor2)
+                                - ang_vel1.cross(point.anchor1);
+                            point.normal_speed = relative_velocity.dot(manifold.normal);
                         });
                     });
 

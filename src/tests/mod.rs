@@ -329,6 +329,181 @@ fn woken_body_takes_one_steps_gravity() {
     );
 }
 
+/// A ball dropped onto the ground at 3 m/s, with restitution 0.5 and no friction, rebounds once at
+/// 1.5 m/s and then rebounds no faster than half of what it lands with.
+///
+/// After the first rebound only gravity and the contact act on the ball. Gravity gives back in
+/// the fall what the rise took, and the contact adds no energy but restitution's, so the ball
+/// lands again at most as fast as it left, 1.5 m/s, and leaves that landing at most at
+/// e × 1.5 = 0.75 m/s. It rises 1.1 cm, within the narrow phase's 5 cm recycling distance, so
+/// every later step recycles its contact: a recycled point that kept the normal speed of the
+/// 3 m/s landing makes restitution repeat that landing's 1.5 m/s rebound at every step.
+#[cfg(feature = "default-collider")]
+#[test]
+fn recycled_contact_does_not_repeat_an_old_bounce() {
+    const HZ: f64 = 60.0;
+
+    let mut app = create_app();
+    app.insert_resource(Time::<Fixed>::from_hz(HZ))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / HZ,
+        )))
+        .insert_resource(Gravity(Vector::NEG_Y * 100.0));
+
+    app.world_mut().spawn((
+        RigidBody::Static,
+        #[cfg(feature = "2d")]
+        Collider::rectangle(20.0, 1.0),
+        #[cfg(feature = "3d")]
+        Collider::cuboid(20.0, 1.0, 20.0),
+        Position(RVector::NEG_Y * 0.5),
+        Restitution::new(0.5),
+        Friction::new(0.0),
+    ));
+    let ball = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            #[cfg(feature = "2d")]
+            Collider::circle(0.5),
+            #[cfg(feature = "3d")]
+            Collider::sphere(0.5),
+            Position(RVector::Y * 0.51),
+            LinearVelocity(Vector::NEG_Y * 3.0),
+            Restitution::new(0.5),
+            Friction::new(0.0),
+        ))
+        .id();
+
+    let rise = |app: &App| app.world().get::<LinearVelocity>(ball).unwrap().y;
+
+    // The first landing: restitution sends it off at e × 3 m/s, which the solver sets to within
+    // rounding; 1 cm/s is only a check that this is the landing the bound below starts from.
+    let mut steps = 0;
+    while rise(&app) <= 0.0 {
+        app.update();
+        steps += 1;
+        assert!(steps < 10, "the ball did not rebound");
+    }
+    assert!(
+        (rise(&app) - 1.5).abs() < 0.01,
+        "it rebounded at {}",
+        rise(&app)
+    );
+
+    for step in 0..40 {
+        app.update();
+        assert!(
+            rise(&app) < 0.75,
+            "{step} steps after the first rebound, the ball rose at {} m/s",
+            rise(&app)
+        );
+    }
+}
+
+/// A plank resting flat on the ground and set turning about its centre reads, at each point of
+/// its recycled contact, the speed at which the turn moves that point off the ground or into it.
+///
+/// The plank lies still, so the narrow phase keeps its contact from the step before, with the
+/// normal speed of a plank at rest. Turning at ω about the axis across its length, it lifts the
+/// point x along it from its centre at ω x and drives the point at -x down as fast: a recycled
+/// point that kept its old normal speed reads about 0, and one that mixed up the turn's direction
+/// reads -ω x. The plank's velocity is set exactly, so the bound is only the rounding of the
+/// cross product, far under the 0.5 m/s the turn gives the ends.
+#[cfg(feature = "default-collider")]
+#[test]
+fn recycled_contact_reads_the_bodies_current_turn() {
+    use crate::collision::CollisionDiagnostics;
+    use crate::math::ToF32Precision;
+
+    const HZ: f64 = 60.0;
+    const OMEGA: f32 = 0.5;
+
+    #[derive(Resource, Clone, Copy)]
+    struct Pair(Entity, Entity);
+
+    /// Each point's distance along the plank from its centre and normal speed, and whether the
+    /// narrow phase recycled the contact, as the solver gets them.
+    #[derive(Resource, Default)]
+    struct Read(Vec<(f32, f32)>, bool);
+
+    // One physics step per update, so that the step read is the one the turn was set for.
+    let mut app = create_app();
+    app.insert_resource(Time::<Fixed>::from_hz(HZ))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / HZ,
+        )));
+    app.init_resource::<Read>().add_systems(
+        PhysicsSchedule,
+        (|world: &mut World| {
+            let Pair(ground, plank) = *world.resource::<Pair>();
+            let points = world.resource::<ContactGraph>().get(ground, plank).map_or(
+                Vec::new(),
+                |(_, pair)| {
+                    pair.manifolds
+                        .iter()
+                        .flat_map(|manifold| manifold.points.iter())
+                        .map(|point| (point.point.x.f32(), point.normal_speed))
+                        .collect()
+                },
+            );
+            let recycled = world.resource::<CollisionDiagnostics>().recycled_count > 0;
+            *world.resource_mut::<Read>() = Read(points, recycled);
+        })
+        .after(PhysicsStepSystems::NarrowPhase)
+        .before(PhysicsStepSystems::Solver),
+    );
+
+    let ground = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            #[cfg(feature = "2d")]
+            Collider::rectangle(20.0, 1.0),
+            #[cfg(feature = "3d")]
+            Collider::cuboid(20.0, 1.0, 20.0),
+            Position(RVector::NEG_Y * 0.5),
+        ))
+        .id();
+    let plank = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            #[cfg(feature = "2d")]
+            Collider::rectangle(2.0, 0.2),
+            #[cfg(feature = "3d")]
+            Collider::cuboid(2.0, 0.2, 0.4),
+            Position(RVector::Y * 0.1),
+            SleepingDisabled,
+        ))
+        .id();
+    app.insert_resource(Pair(ground, plank));
+
+    for _ in 0..30 {
+        app.update();
+    }
+    let mut body = app.world_mut().entity_mut(plank);
+    body.insert(LinearVelocity::ZERO);
+    #[cfg(feature = "2d")]
+    body.insert(AngularVelocity(OMEGA));
+    #[cfg(feature = "3d")]
+    body.insert(AngularVelocity(Vector::Z * OMEGA));
+    let centre = body.get::<Position>().unwrap().x.f32();
+    app.update();
+
+    let Read(points, recycled) = app.world().resource::<Read>();
+    assert!(*recycled, "the resting plank's contact was not recycled");
+    assert!(!points.is_empty(), "the plank was not on the ground");
+    for &(x, normal_speed) in points {
+        let along = x - centre;
+        assert!(
+            (normal_speed - OMEGA * along).abs() < 1e-3,
+            "the point {along} m along the plank read {normal_speed} m/s, the turn moves it at {}",
+            OMEGA * along
+        );
+    }
+}
+
 #[test]
 fn no_ambiguity_errors() {
     #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
