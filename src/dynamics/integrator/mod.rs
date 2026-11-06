@@ -108,7 +108,8 @@ pub enum IntegrationSystems {
     ///
     /// Typically runs in the [`SubstepSchedule`], in [`IntegrationSystems::Position`].
     Position,
-    /// Clears the velocity increments of bodies after the substepping loop.
+    /// Clears the velocity increments of all bodies after the substepping loop,
+    /// including bodies that are not in the solver, such as sleeping bodies.
     ///
     /// Runs in the [`PhysicsSchedule`], in [`SolverSystems::PostSubstep`].
     ClearVelocityIncrements,
@@ -315,8 +316,12 @@ pub fn pre_process_velocity_increments(
 }
 
 /// Clears the velocity increments of bodies after the substepping loop.
+///
+/// This includes bodies that are not in the solver, such as sleeping bodies:
+/// [`pre_process_velocity_increments`] adds gravity to them too, and what they gather
+/// in a step they are not simulated in must not be applied in the step they wake up in.
 fn clear_velocity_increments(
-    mut bodies: Query<&mut VelocityIntegrationData, With<SolverBodyIndex>>,
+    mut bodies: Query<&mut VelocityIntegrationData>,
     mut diagnostics: ResMut<SolverDiagnostics>,
 ) {
     let start = crate::utils::Instant::now();

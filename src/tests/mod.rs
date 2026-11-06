@@ -255,6 +255,80 @@ fn box_held_by_friction_on_slope_does_not_creep() {
     );
 }
 
+/// A box that falls asleep on a slab, and is woken with the slab taken away, falls freely from rest
+/// in its first awake step: its velocity changes by one step's gravity, g Δt, and no more.
+///
+/// The bound comes from the solver's precision: velocities and gravity are `f32` in both
+/// precisions. The step adds g h to the velocity at each of its 6 substeps of h = Δt / 6; the
+/// increment rounds to within 2 ulps of g h, and each of the 6 sums to within half an ulp of
+/// g Δt ≈ 0.16 m/s (7.5e-9 m/s), which leaves under 1e-7 m/s in all. The bound is 1e-6 m/s.
+/// Velocity increments gathered while asleep and kept for the step the body wakes in add
+/// g h² / (1 - h) per substep, 4.6e-4 m/s over this step.
+#[cfg(feature = "default-collider")]
+#[test]
+fn woken_body_takes_one_steps_gravity() {
+    const HZ: f64 = 60.0;
+
+    let mut app = create_app();
+    app.insert_resource(Time::<Fixed>::from_hz(HZ))
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            1.0 / HZ,
+        )));
+
+    let slab = app
+        .world_mut()
+        .spawn((
+            RigidBody::Static,
+            #[cfg(feature = "2d")]
+            Collider::rectangle(10.0, 1.0),
+            #[cfg(feature = "3d")]
+            Collider::cuboid(10.0, 1.0, 10.0),
+        ))
+        .id();
+    let body = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            #[cfg(feature = "2d")]
+            Collider::rectangle(1.0, 1.0),
+            #[cfg(feature = "3d")]
+            Collider::cuboid(1.0, 1.0, 1.0),
+            Position(RVector::Y),
+        ))
+        .id();
+
+    // Let the box settle and fall asleep, then sleep for another second.
+    for _ in 0..5 * HZ as usize {
+        app.update();
+        if app.world().get::<Sleeping>(body).is_some() {
+            break;
+        }
+    }
+    assert!(
+        app.world().get::<Sleeping>(body).is_some(),
+        "the box did not fall asleep"
+    );
+    for _ in 0..HZ as usize {
+        app.update();
+    }
+    assert!(app.world().get::<Sleeping>(body).is_some());
+
+    // Take the slab away and wake the box.
+    app.world_mut().despawn(slab);
+    app.world_mut().entity_mut(body).remove::<Sleeping>();
+
+    let velocity = |app: &App| app.world().get::<LinearVelocity>(body).unwrap().0;
+    let before = velocity(&app);
+    app.update();
+    let change = velocity(&app) - before;
+
+    let gravity = Vector::NEG_Y * 9.81 * (1.0 / HZ) as f32;
+    assert!(
+        (change - gravity).length() < 1e-6,
+        "the first awake step changed the velocity by {change:?}, one step's gravity is {gravity:?}"
+    );
+}
+
 #[test]
 fn no_ambiguity_errors() {
     #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
