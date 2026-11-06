@@ -313,16 +313,20 @@ impl PrismaticJoint {
                 (omega_sq * position_error + two_zeta_omega * velocity_error) * dt * inv_denominator
             }
             MotorModel::AccelerationBased { stiffness, damping } => {
-                damping * velocity_error + stiffness * position_error * dt
+                // Velocity change = (stiffness * pos_error + damping * vel_error) * dt
+                (stiffness * position_error + damping * velocity_error) * dt
             }
             MotorModel::ForceBased { stiffness, damping } => {
-                // Velocity change = (stiffness * pos_error + damping * vel_error) * inv_mass
-                (stiffness * position_error + damping * velocity_error) * w_sum
+                // Velocity change = (stiffness * pos_error + damping * vel_error) * inv_mass * dt
+                (stiffness * position_error + damping * velocity_error) * w_sum * dt
             }
         };
 
+        // Apply even a tiny correction. It is the acceleration times `dt^2`, so a fixed
+        // threshold on it would ignore every acceleration below `threshold / dt^2`, and leave
+        // the joint off its target wherever the motor's acceleration is that small.
         let correction = target_velocity_change * dt;
-        if correction.abs() <= f32::EPSILON {
+        if correction == 0.0 {
             return;
         }
 

@@ -226,9 +226,9 @@ fn revolute_motor_respects_max_torque() {
     }
 }
 
-/// Tests that a position-targeting motor moves the joint towards the target position.
-#[test]
-fn revolute_motor_position_target() {
+/// Runs a revolute joint whose motor targets 1 rad with no torque limit for 3 seconds,
+/// and returns the joint's angle and angular speed about its hinge.
+fn revolute_motor_settled(motor_model: MotorModel) -> (f32, f32) {
     let mut app = create_app();
     app.finish();
 
@@ -237,10 +237,13 @@ fn revolute_motor_position_target() {
         .spawn((RigidBody::Static, Position(RVector::ZERO)))
         .id();
 
+    // Kept awake: near the end of its approach, the body turns slower than the sleep threshold
+    // and would fall asleep short of the target.
     let dynamic = app
         .world_mut()
         .spawn((
             RigidBody::Dynamic,
+            SleepingDisabled,
             Position(RVector::X * 2.0),
             Mass(1.0),
             #[cfg(feature = "2d")]
@@ -250,16 +253,11 @@ fn revolute_motor_position_target() {
         ))
         .id();
 
-    // Create a revolute joint with a position-targeting motor.
-    let target_angle = 1.0;
     app.world_mut().spawn(
         RevoluteJoint::new(anchor, dynamic).with_motor(AngularMotor {
-            target_position: target_angle,
+            target_position: 1.0,
             max_torque: f32::MAX,
-            motor_model: MotorModel::AccelerationBased {
-                stiffness: 50.0,
-                damping: 20.0,
-            },
+            motor_model,
             ..default()
         }),
     );
@@ -277,25 +275,46 @@ fn revolute_motor_position_target() {
 
     let body_ref = app.world().entity(dynamic);
     let rotation = body_ref.get::<Rotation>().unwrap();
+    let angular_velocity = body_ref.get::<AngularVelocity>().unwrap();
 
-    // The body should have rotated towards the target angle (allow some tolerance).
     #[cfg(feature = "2d")]
     {
-        let angle = rotation.as_radians();
-        assert!(
-            angle.abs() > 0.3,
-            "Motor should have rotated the body: {}",
-            angle
-        );
+        (rotation.as_radians(), angular_velocity.0)
     }
     #[cfg(feature = "3d")]
     {
         let (axis, angle) = rotation.to_axis_angle();
-        let signed_angle = angle * axis.z.signum();
+        (angle * axis.z.signum(), angular_velocity.0.z)
+    }
+}
+
+/// Tests that a position-targeting motor settles the joint at the target position.
+///
+/// Both models get the same stiffness and damping, and with unit angular inertia they set the
+/// same motion: θ'' = 50 (1 - θ) - 20 θ', overdamped, with modes e^(-2.93 t) and e^(-17.1 t).
+/// From rest at 0, after 3 s the joint is 1.21 e^(-2.93 * 3) ≈ 1.8e-4 rad short of the target
+/// and turning at 5.4e-4 rad/s; integrating it at the 1280 substeps per second gives 1.9e-4 rad
+/// and 5.6e-4 rad/s. The bounds, 1e-3 rad and 1e-2 rad/s, leave 5 and 18 times that. A motor
+/// whose damping term is not scaled by the substep time overcorrects the velocity error 20-fold
+/// every substep and spins the body ever faster. One that skips corrections below
+/// `f32::EPSILON` ignores accelerations under 0.2 rad/s² here and leaves the joint 3 mrad past
+/// the target.
+#[test]
+fn revolute_motor_position_target() {
+    for motor_model in [
+        MotorModel::AccelerationBased {
+            stiffness: 50.0,
+            damping: 20.0,
+        },
+        MotorModel::ForceBased {
+            stiffness: 50.0,
+            damping: 20.0,
+        },
+    ] {
+        let (angle, speed) = revolute_motor_settled(motor_model);
         assert!(
-            signed_angle.abs() > 0.3,
-            "Motor should have rotated the body: {}",
-            signed_angle
+            (angle - 1.0).abs() < 1e-3 && speed.abs() < 1e-2,
+            "{motor_model:?} left the joint at {angle} rad, turning at {speed} rad/s",
         );
     }
 }
@@ -368,6 +387,82 @@ fn prismatic_motor_position_target() {
         displacement,
         final_pos.x
     );
+}
+
+/// Tests that a linear position-targeting motor with no force limit settles the joint at the
+/// target position.
+///
+/// As in `revolute_motor_position_target`, both models set the same motion for a unit mass:
+/// x'' = 50 (1 - x) - 20 x', which after 3 s leaves the joint 1.8e-4 m short of the target and
+/// moving at 5.4e-4 m/s (integrated at the substeps: 1.9e-4 m and 5.6e-4 m/s), under the same
+/// bounds.
+#[test]
+fn prismatic_motor_settles_at_position_target() {
+    for motor_model in [
+        MotorModel::AccelerationBased {
+            stiffness: 50.0,
+            damping: 20.0,
+        },
+        MotorModel::ForceBased {
+            stiffness: 50.0,
+            damping: 20.0,
+        },
+    ] {
+        let mut app = create_app();
+        app.finish();
+
+        let anchor = app
+            .world_mut()
+            .spawn((RigidBody::Static, Position(RVector::ZERO)))
+            .id();
+
+        // Kept awake, as in `revolute_motor_settled`.
+        let dynamic = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                SleepingDisabled,
+                Position(RVector::X * 2.0),
+                Mass(1.0),
+                #[cfg(feature = "2d")]
+                AngularInertia(1.0),
+                #[cfg(feature = "3d")]
+                AngularInertia::new(Vec3::splat(1.0)),
+            ))
+            .id();
+
+        // The joint's position is the second body's offset along the slider axis
+        // from the anchor at 2 m, so the target puts the body at 3 m.
+        app.world_mut().spawn(
+            PrismaticJoint::new(anchor, dynamic)
+                .with_local_anchor1(Vector::X * 2.0)
+                .with_motor(LinearMotor {
+                    target_position: 1.0,
+                    max_force: f32::MAX,
+                    motor_model,
+                    ..default()
+                }),
+        );
+
+        // Initialize the app.
+        app.update();
+
+        // Run simulation for 3 seconds to let it settle.
+        let duration = 3.0;
+        let steps = (duration / TIMESTEP) as usize;
+
+        for _ in 0..steps {
+            app.update();
+        }
+
+        let body_ref = app.world().entity(dynamic);
+        let position = body_ref.get::<Position>().unwrap().0.x - 2.0;
+        let speed = body_ref.get::<LinearVelocity>().unwrap().0.x;
+        assert!(
+            (position - 1.0).abs() < 1e-3 && speed.abs() < 1e-2,
+            "{motor_model:?} left the joint at {position} m, moving at {speed} m/s",
+        );
+    }
 }
 
 /// Tests that a velocity motor on a revolute joint respects angle limits.

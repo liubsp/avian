@@ -113,7 +113,9 @@ fn setup(
                         max_torque: 1000.0,
                         motor_model: MotorModel::AccelerationBased {
                             stiffness: 0.0,
-                            damping: 1.0,
+                            // Closes the velocity error within one substep: 1 / substep time, at
+                            // 64 Hz and the default 6 substeps.
+                            damping: 384.0,
                         },
                         ..default()
                     }),));
