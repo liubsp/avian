@@ -1074,14 +1074,29 @@ fn store_contact_impulses(
                 );
             };
 
+            #[cfg(feature = "3d")]
+            let tangent_directions = constraint.tangent_directions();
+
             for (contact, constraint_point) in
                 manifold.points.iter_mut().zip(constraint.points.iter())
             {
                 contact.warm_start_normal_impulse = constraint_point.normal_part.impulse;
-                contact.warm_start_tangent_impulse = constraint_point
+                let tangent_impulse = constraint_point
                     .tangent_part
                     .as_ref()
                     .map_or(default(), |part| part.impulse);
+                // In 3D, stored in world space: the next step solves friction along
+                // tangent directions of its own. In 2D, the one tangent direction follows
+                // from the normal, and the impulse along it is stored as it is.
+                #[cfg(feature = "2d")]
+                {
+                    contact.warm_start_tangent_impulse = tangent_impulse;
+                }
+                #[cfg(feature = "3d")]
+                {
+                    contact.warm_start_tangent_impulse = tangent_impulse.x * tangent_directions[0]
+                        + tangent_impulse.y * tangent_directions[1];
+                }
                 contact.normal_impulse = constraint_point.normal_part.total_impulse;
             }
         }

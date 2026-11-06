@@ -184,6 +184,77 @@ fn cubes_simulation_is_locally_deterministic() {
     }
 }
 
+/// A box resting on a 14° slope, with friction twice the tan 14° ≈ 0.25 it needs to hold and kept
+/// awake, must stay where it settled.
+///
+/// The bound comes from the solver's precision: its velocities are `f32`. Each step, gravity adds
+/// g sin 14° Δt ≈ 0.04 m/s along the slope, which friction takes away again; rounding leaves a
+/// residual of a few ulps of that, under 1e-7 m/s even across the substeps. If every one of the
+/// 540 measured steps left that residual in the same direction, the box would move
+/// 540 × 1e-7 m/s × (1/60) s ≈ 0.9 µm. The bound is 1 µm. With `f64` positions that is all.
+/// With `f32` positions (the default features), a step that moves the box by less than half an
+/// ulp of its position, 3e-8 m near 1 m, leaves it where it was; the residual moves it at most
+/// 1.7e-9 m a step, so rounding can drop that creep but not add to it, and the bound holds for
+/// both. A friction warm start applied in a different tangent basis than it was solved in makes
+/// the box creep by tens of millimetres here.
+#[cfg(all(feature = "3d", feature = "default-collider"))]
+#[test]
+fn box_held_by_friction_on_slope_does_not_creep() {
+    use crate::physics_transform::PhysicsTransformConfig;
+
+    const HZ: f64 = 60.0;
+
+    let mut app = create_app();
+    app.insert_resource(PhysicsTransformConfig {
+        transform_to_position: false,
+        ..default()
+    })
+    .insert_resource(Time::<Fixed>::from_hz(HZ))
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / HZ,
+    )));
+
+    let tilt = Quat::from_rotation_z(14f32.to_radians());
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(40.0, 1.0, 40.0),
+        Friction::new(0.5),
+        Rotation(tilt),
+    ));
+    let body = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Collider::cuboid(1.0, 1.0, 1.0),
+            Friction::new(0.5),
+            Position(RVector::from(tilt * Vec3::Y)),
+            Rotation(tilt),
+            SleepingDisabled,
+        ))
+        .id();
+
+    let position = |app: &App| app.world().get::<Position>(body).unwrap().0;
+
+    // Let the box settle onto the slope for a second.
+    for _ in 0..HZ as usize {
+        app.update();
+    }
+    let settled = position(&app);
+
+    for _ in 0..9 * HZ as usize {
+        app.update();
+    }
+
+    let normal = RVector::from(tilt * Vec3::Y);
+    let moved = position(&app) - settled;
+    let creep = (moved - normal * moved.dot(normal)).length();
+    assert!(
+        creep < 1e-6,
+        "the box crept {:.6} mm along the slope in 9 s",
+        creep * 1e3
+    );
+}
+
 #[test]
 fn no_ambiguity_errors() {
     #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]

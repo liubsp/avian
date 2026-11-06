@@ -14,6 +14,8 @@ use crate::{
 #[cfg(feature = "serialize")]
 use bevy::reflect::{ReflectDeserialize, ReflectSerialize};
 use bevy::{reflect::Reflect, utils::default};
+#[cfg(feature = "3d")]
+use bevy_math::Vec2;
 
 use super::solver_body::{SolverBody, SolverBodyIndex, SolverBodyInertia};
 
@@ -180,7 +182,20 @@ impl ContactConstraint {
                     anchor1,
                     anchor2,
                     tangents,
-                    warm_start_enabled.then_some(point.warm_start_tangent_impulse),
+                    warm_start_enabled.then_some({
+                        // In 3D, the stored impulse is in world space: project it onto this
+                        // step's tangent directions, which may differ from those it was solved
+                        // along. In 2D, it is the impulse along the one tangent direction.
+                        #[cfg(feature = "2d")]
+                        {
+                            point.warm_start_tangent_impulse
+                        }
+                        #[cfg(feature = "3d")]
+                        {
+                            let impulse = point.warm_start_tangent_impulse;
+                            Vec2::new(impulse.dot(tangents[0]), impulse.dot(tangents[1]))
+                        }
+                    }),
                 )),
                 anchor1,
                 anchor2,

@@ -656,13 +656,17 @@ pub struct ContactPoint {
     #[cfg(feature = "2d")]
     #[doc(alias = "warm_start_friction_impulse")]
     pub warm_start_tangent_impulse: f32,
-    /// The frictional impulse used to warm start the contact solver.
+    /// The frictional impulse used to warm start the contact solver, in world space.
     ///
     /// This corresponds to the clamped accumulated impulse from the last substep
     /// of the previous time step.
+    ///
+    /// The solver picks the tangent directions it solves friction along afresh each time step,
+    /// so the impulse is kept as a world-space vector, not as components along those directions,
+    /// and projected onto the next time step's directions when it is used.
     #[cfg(feature = "3d")]
     #[doc(alias = "warm_start_friction_impulse")]
-    pub warm_start_tangent_impulse: Vec2,
+    pub warm_start_tangent_impulse: Vector,
     /// The contact feature ID on the first shape. This indicates the ID of
     /// the vertex, edge, or face of the contact, if one can be determined.
     pub feature_id1: PackedFeatureId,
@@ -691,7 +695,7 @@ impl ContactPoint {
             #[cfg(feature = "2d")]
             warm_start_tangent_impulse: 0.0,
             #[cfg(feature = "3d")]
-            warm_start_tangent_impulse: Vec2::ZERO,
+            warm_start_tangent_impulse: Vector::ZERO,
             feature_id1: PackedFeatureId::UNKNOWN,
             feature_id2: PackedFeatureId::UNKNOWN,
         }
