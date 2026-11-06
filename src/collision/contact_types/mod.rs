@@ -431,47 +431,168 @@ impl ContactManifold {
     /// Contacts are first matched based on their [feature IDs](PackedFeatureId), and if they are unknown,
     /// matching is done based on contact positions using the given `distance_threshold`
     /// for determining if points are too far away from each other to be considered matching.
+    ///
+    /// Each previous contact hands its impulses to at most one contact, so that two contacts
+    /// matching the same previous one do not both start from its impulse.
     #[inline]
     pub fn match_contacts(&mut self, previous_contacts: &[ContactPoint], distance_threshold: f32) {
+        let mut claimed = vec![false; previous_contacts.len()];
+        self.match_unclaimed_contacts(previous_contacts, &mut claimed, distance_threshold);
+    }
+
+    /// Copies impulses from the previous contacts not yet `claimed` to matching contacts in
+    /// `self`, as [`match_contacts`](Self::match_contacts) does, and marks the previous contacts
+    /// it hands on as claimed. `claimed` has one entry per previous contact.
+    ///
+    /// Matching the manifolds of a contact pair one after another with the same `claimed` hands
+    /// each previous contact's impulses to at most one contact of the pair.
+    ///
+    /// Contacts with known features match on their features alone, at any distance: a contact that
+    /// slides or turns keeps its features while its anchors move, by up to the bodies' relative
+    /// motion in a time step, which can be far more than `distance_threshold`. The manifolds do
+    /// not record which sub-shapes of a compound collider they belong to, and feature IDs repeat
+    /// across sub-shapes of the same kind, so a contact can also match one of another sub-shape on
+    /// equal features. Claiming bounds that to one previous contact's impulses.
+    fn match_unclaimed_contacts(
+        &mut self,
+        previous_contacts: &[ContactPoint],
+        claimed: &mut [bool],
+        distance_threshold: f32,
+    ) {
+        debug_assert_eq!(previous_contacts.len(), claimed.len());
+
         // The squared maximum distance for two contact points to be considered matching.
         let distance_threshold_squared = distance_threshold.powi(2);
 
-        for contact in self.points.iter_mut() {
-            for previous_contact in previous_contacts.iter() {
-                // If the feature IDs match, copy the contact impulses over for warm starting.
-                if (contact.feature_id1 == previous_contact.feature_id1
-                    && contact.feature_id2 == previous_contact.feature_id2) ||
-                    // we have to check both directions because the entities are sorted in order
-                    // of aabb.min.x, which could have changed even the two objects in contact are the same
-                    (contact.feature_id2 == previous_contact.feature_id1
-                    && contact.feature_id1 == previous_contact.feature_id2)
-                {
-                    contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
-                    contact.warm_start_tangent_impulse =
-                        previous_contact.warm_start_tangent_impulse;
-                    break;
-                }
+        let known_features = |contact: &ContactPoint| {
+            contact.feature_id1 != PackedFeatureId::UNKNOWN
+                && contact.feature_id2 != PackedFeatureId::UNKNOWN
+        };
 
-                let unknown_features = contact.feature_id1 == PackedFeatureId::UNKNOWN
-                    || contact.feature_id2 == PackedFeatureId::UNKNOWN;
+        let take = |contact: &mut ContactPoint, index: usize, claimed: &mut [bool]| {
+            let previous_contact = &previous_contacts[index];
+            contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
+            contact.warm_start_tangent_impulse = previous_contact.warm_start_tangent_impulse;
+            claimed[index] = true;
+        };
 
-                // If the feature IDs are unknown and the contact positions match closely enough,
-                // copy the contact impulses over for warm starting.
-                if unknown_features
-                    && (contact.anchor1.distance_squared(previous_contact.anchor1)
-                        < distance_threshold_squared
-                        && contact.anchor2.distance_squared(previous_contact.anchor2)
-                            < distance_threshold_squared)
-                    || (contact.anchor1.distance_squared(previous_contact.anchor2)
-                        < distance_threshold_squared
-                        && contact.anchor2.distance_squared(previous_contact.anchor1)
-                            < distance_threshold_squared)
-                {
-                    contact.warm_start_normal_impulse = previous_contact.warm_start_normal_impulse;
-                    contact.warm_start_tangent_impulse =
-                        previous_contact.warm_start_tangent_impulse;
-                    break;
+        // Contacts whose features are known match a previous contact on the same features.
+        for contact in self
+            .points
+            .iter_mut()
+            .filter(|contact| known_features(contact))
+        {
+            let matching =
+                previous_contacts
+                    .iter()
+                    .enumerate()
+                    .position(|(index, previous_contact)| {
+                        !claimed[index]
+                            && ((contact.feature_id1 == previous_contact.feature_id1
+                            && contact.feature_id2 == previous_contact.feature_id2)
+                            // we have to check both directions because the entities are sorted in order
+                            // of aabb.min.x, which could have changed even the two objects in contact are the same
+                            || (contact.feature_id2 == previous_contact.feature_id1
+                                && contact.feature_id1 == previous_contact.feature_id2))
+                    });
+            if let Some(index) = matching {
+                take(contact, index, claimed);
+            }
+        }
+
+        // Contacts whose features are unknown match the nearest previous contact whose positions
+        // are close enough.
+        for contact in self
+            .points
+            .iter_mut()
+            .filter(|contact| !known_features(contact))
+        {
+            let distance_squared = |previous_contact: &ContactPoint| {
+                let direct = (
+                    contact.anchor1.distance_squared(previous_contact.anchor1),
+                    contact.anchor2.distance_squared(previous_contact.anchor2),
+                );
+                let swapped = (
+                    contact.anchor1.distance_squared(previous_contact.anchor2),
+                    contact.anchor2.distance_squared(previous_contact.anchor1),
+                );
+                [direct, swapped]
+                    .into_iter()
+                    .filter(|&(d1, d2)| {
+                        d1 < distance_threshold_squared && d2 < distance_threshold_squared
+                    })
+                    .map(|(d1, d2)| d1 + d2)
+                    .reduce(f32::min)
+            };
+            let nearest = previous_contacts
+                .iter()
+                .enumerate()
+                .filter(|&(index, _)| !claimed[index])
+                .filter_map(|(index, previous_contact)| {
+                    distance_squared(previous_contact).map(|d| (index, d))
+                })
+                .reduce(|a, b| if b.1 < a.1 { b } else { a });
+            if let Some((index, _)) = nearest {
+                take(contact, index, claimed);
+            }
+        }
+    }
+
+    /// Copies impulses from the points of a contact pair's `previous_manifolds` to matching points
+    /// of its `manifolds`, as [`match_contacts`](Self::match_contacts) does for one manifold.
+    ///
+    /// Each previous point hands its impulses to at most one point of the pair, whichever of the
+    /// previous manifolds it was in, and a point's match in one previous manifold is not
+    /// overwritten by another's.
+    pub(crate) fn match_pair_contacts(
+        manifolds: &mut [ContactManifold],
+        previous_manifolds: &[ContactManifold],
+        distance_threshold: f32,
+    ) {
+        let previous_points: Vec<ContactPoint> = previous_manifolds
+            .iter()
+            .flat_map(|manifold| manifold.points.iter().copied())
+            .collect();
+        let mut claimed = vec![false; previous_points.len()];
+        for manifold in manifolds.iter_mut() {
+            manifold.match_unclaimed_contacts(&previous_points, &mut claimed, distance_threshold);
+        }
+    }
+
+    /// Removes contact points that coincide with another point of the manifold: points whose
+    /// anchors on both bodies lie within `distance` of that point's.
+    ///
+    /// Of two coincident points, the one whose [feature IDs](PackedFeatureId) are known is kept, so
+    /// that it can be matched by its features in the next time step, even where the other's depth
+    /// was found more accurately.
+    ///
+    /// Two copies of one contact found by different queries, such as a clipped crossing and the
+    /// shapes' closest point on a curved shape, can lie apart by more than `distance`. They then
+    /// stay two constraints, which doubles the contact's stiffness, though each previous contact
+    /// still hands its impulses to only one of them. Distinct points of a contact patch closer than
+    /// `distance` are merged into one.
+    #[inline]
+    pub(crate) fn remove_coincident_points(&mut self, distance: f32) {
+        let distance_squared = distance * distance;
+        let known_features = |contact: &ContactPoint| {
+            contact.feature_id1 != PackedFeatureId::UNKNOWN
+                && contact.feature_id2 != PackedFeatureId::UNKNOWN
+        };
+
+        let mut i = 1;
+        while i < self.points.len() {
+            let point = self.points[i];
+            let coincident = self.points[..i].iter().position(|kept| {
+                kept.anchor1.distance_squared(point.anchor1) < distance_squared
+                    && kept.anchor2.distance_squared(point.anchor2) < distance_squared
+            });
+            if let Some(j) = coincident {
+                if !known_features(&self.points[j]) && known_features(&point) {
+                    self.points[j] = point;
                 }
+                self.points.remove(i);
+            } else {
+                i += 1;
             }
         }
     }
@@ -821,5 +942,120 @@ impl SingleContact {
             local_normal2: self.local_normal1,
             penetration: self.penetration,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The narrow phase's matching distance at a length unit of 1.
+    const THRESHOLD: f32 = 0.1;
+
+    fn point(
+        anchor1: Vector,
+        anchor2: Vector,
+        features: (PackedFeatureId, PackedFeatureId),
+        impulse: f32,
+    ) -> ContactPoint {
+        let mut point = ContactPoint::new(anchor1, anchor2, RVector::ZERO, 0.0)
+            .with_feature_ids(features.0, features.1);
+        point.warm_start_normal_impulse = impulse;
+        point
+    }
+
+    fn manifold(points: impl IntoIterator<Item = ContactPoint>) -> ContactManifold {
+        ContactManifold::new(points, Vector::Y)
+    }
+
+    /// The normal impulses handed to the points of each manifold.
+    fn handed(manifolds: &[ContactManifold]) -> Vec<Vec<f32>> {
+        manifolds
+            .iter()
+            .map(|manifold| {
+                manifold
+                    .points
+                    .iter()
+                    .map(|point| point.warm_start_normal_impulse)
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn matched(mut manifolds: Vec<ContactManifold>, previous: &[ContactManifold]) -> Vec<Vec<f32>> {
+        ContactManifold::match_pair_contacts(&mut manifolds, previous, THRESHOLD);
+        handed(&manifolds)
+    }
+
+    const UNKNOWN: (PackedFeatureId, PackedFeatureId) =
+        (PackedFeatureId::UNKNOWN, PackedFeatureId::UNKNOWN);
+
+    fn features(vertex: u32, face: u32) -> (PackedFeatureId, PackedFeatureId) {
+        (PackedFeatureId::vertex(vertex), PackedFeatureId::face(face))
+    }
+
+    /// Two points found at one old point, as the collision library can find one contact twice,
+    /// share its impulse: the first takes it, and the other starts from none.
+    #[test]
+    fn a_stored_impulse_goes_to_one_point() {
+        let (a, b) = (Vector::X, Vector::NEG_X);
+        let previous = [manifold([point(a, b, UNKNOWN, 1.0)])];
+        let near = Vector::Y * 0.01;
+        let new = vec![manifold([
+            point(a + near, b + near, UNKNOWN, 0.0),
+            point(a + near * 2.0, b + near * 2.0, UNKNOWN, 0.0),
+        ])];
+        assert_eq!(matched(new, &previous), [vec![1.0, 0.0]]);
+    }
+
+    /// A pair with two manifolds of equal features, as two sub-shapes of a compound collider have,
+    /// hands each old point's impulse to one new point; a match from one old manifold is not
+    /// overwritten by the next.
+    #[test]
+    fn a_match_in_one_old_manifold_is_kept_through_the_next() {
+        let (a, b) = (Vector::X, Vector::NEG_X);
+        let f = features(1, 2);
+        let previous = [
+            manifold([point(a, b, f, 1.0)]),
+            manifold([point(-a, -b, f, 2.0)]),
+        ];
+        let new = vec![
+            manifold([point(a, b, f, 0.0)]),
+            manifold([point(-a, -b, f, 0.0)]),
+        ];
+        assert_eq!(matched(new, &previous), [vec![1.0], vec![2.0]]);
+    }
+
+    /// A point with known features matches only a point on the same features, even where another
+    /// point's anchors, swapped, lie on its own.
+    #[test]
+    fn known_features_match_only_on_features() {
+        let (a, b) = (Vector::X, Vector::Y);
+        let previous = [manifold([point(b, a, features(3, 4), 1.0)])];
+        let new = vec![manifold([point(a, b, features(1, 2), 0.0)])];
+        assert_eq!(matched(new, &previous), [vec![0.0]]);
+    }
+
+    /// A point with known features keeps its impulse while its anchors move far within a step, as
+    /// on a body sliding or turning fast.
+    #[test]
+    fn known_features_match_at_any_distance() {
+        let f = features(1, 2);
+        let previous = [manifold([point(Vector::X, Vector::ZERO, f, 1.0)])];
+        let new = vec![manifold([point(Vector::X, Vector::X * 2.0, f, 0.0)])];
+        assert_eq!(matched(new, &previous), [vec![1.0]]);
+    }
+
+    /// Unknown features are no match: points with unknown features match only by distance.
+    #[test]
+    fn unknown_features_are_no_match() {
+        let previous = [manifold([point(Vector::X, Vector::NEG_X, UNKNOWN, 1.0)])];
+        let new = vec![manifold([point(
+            Vector::X * 3.0,
+            Vector::NEG_X * 3.0,
+            UNKNOWN,
+            0.0,
+        )])];
+        assert_eq!(matched(new, &previous), [vec![0.0]]);
     }
 }

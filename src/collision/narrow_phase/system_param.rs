@@ -404,6 +404,10 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
         let contact_tolerance = length_unit * self.config.contact_tolerance;
         let recycle_distance = length_unit * self.config.recycle_distance;
         let recycle_distance_non_touching = recycle_distance.min(contact_tolerance);
+        // Contact points of a manifold closer than this are one contact. It is well above the
+        // rounding of points found at the same place, and well below the spacing of a contact
+        // patch's distinct points. See `ContactManifold::remove_coincident_points` for its edges.
+        let coincidence_distance = length_unit * 1e-4;
         #[cfg(feature = "2d")]
         let recycle_angle_cos = ops::cos(self.config.recycle_angle);
         #[cfg(feature = "3d")]
@@ -876,6 +880,11 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                         }
                     });
 
+                    // Remove coincident points. A collision algorithm can find the same contact
+                    // more than once, such as an edge crossing found from both of its ends, and
+                    // the solver would solve each copy as a constraint of its own.
+                    manifold.remove_coincident_points(coincidence_distance);
+
                     // Prune extra contact points.
                     #[cfg(feature = "3d")]
                     if manifold.points.len() > 4 {
@@ -907,11 +916,11 @@ impl<C: AnyCollider> NarrowPhase<'_, '_, C> {
                     // TODO: Cache this?
                     let distance_threshold = 0.1 * self.length_unit.0;
 
-                    for manifold in contacts.manifolds.iter_mut() {
-                        for previous_manifold in old_manifolds.iter() {
-                            manifold.match_contacts(&previous_manifold.points, distance_threshold);
-                        }
-                    }
+                    ContactManifold::match_pair_contacts(
+                        &mut contacts.manifolds,
+                        &old_manifolds,
+                        distance_threshold,
+                    );
                 }
 
                 // Record how many manifolds were added or removed.

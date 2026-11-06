@@ -504,6 +504,134 @@ fn recycled_contact_reads_the_bodies_current_turn() {
     }
 }
 
+/// A box's lower edge strikes a cone's side at 20 m/s, both with speculative contacts, so that
+/// their contact carries the blow's impulse into the next step's matching.
+///
+/// The collision library finds the edge's crossing with the cone's side more than once in the same
+/// manifold: from both ends of the side's segment, and again as the shapes' closest point. Points
+/// closer than 0.1 mm are one contact, so no manifold may hold two of them. And the narrow phase
+/// may hand the step's points at most the impulses the last step's points ended with: each old
+/// point's impulse goes to at most one new point, else the solver's warm start applies it twice.
+#[cfg(all(feature = "3d", feature = "default-collider"))]
+#[test]
+fn contact_matching_hands_each_stored_impulse_on_once() {
+    use crate::physics_transform::PhysicsTransformConfig;
+
+    const HZ: f64 = 120.0;
+
+    #[derive(Resource, Clone, Copy)]
+    struct Pair(Entity, Entity);
+
+    /// The normal impulses the narrow phase handed the pair's points in the last step.
+    #[derive(Resource, Default)]
+    struct Handed(f32);
+
+    fn pair_points(world: &World) -> Vec<Vec<ContactPoint>> {
+        let Pair(cone, block) = *world.resource::<Pair>();
+        world
+            .resource::<ContactGraph>()
+            .get(cone, block)
+            .map_or(Vec::new(), |(_, pair)| {
+                pair.manifolds
+                    .iter()
+                    .map(|manifold| manifold.points.to_vec())
+                    .collect()
+            })
+    }
+
+    let mut app = create_app();
+    app.insert_resource(PhysicsTransformConfig {
+        transform_to_position: false,
+        ..default()
+    })
+    .insert_resource(Time::<Fixed>::from_hz(HZ))
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / HZ,
+    )))
+    .init_resource::<Handed>()
+    .add_systems(
+        PhysicsSchedule,
+        (|world: &mut World| {
+            let handed = pair_points(world)
+                .iter()
+                .flatten()
+                .map(|point| point.warm_start_normal_impulse)
+                .sum();
+            world.resource_mut::<Handed>().0 = handed;
+        })
+        .after(PhysicsStepSystems::NarrowPhase)
+        .before(PhysicsStepSystems::Solver),
+    );
+
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(200.0, 1.0, 200.0),
+        Friction::new(0.5),
+        Position(RVector::NEG_Y * 0.5),
+    ));
+    let (radius, height) = (0.18, 0.7);
+    let cone = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Collider::cone(radius, height),
+            Friction::new(0.5),
+            Restitution::new(0.1),
+            Position(RVector::Y * (height * 0.5) as Real),
+            SpeculativeCcd::new(1.0),
+        ))
+        .id();
+    // The box's lower edge 0.2 m up, 1 m short of the cone's side at that height.
+    let (size, low) = (Vec3::new(1.8, 0.74, 0.38), 0.2);
+    let reach = radius * (1.0 - low / height);
+    let block = app
+        .world_mut()
+        .spawn((
+            RigidBody::Kinematic,
+            Collider::cuboid(size.x, size.y, size.z),
+            Friction::new(0.4),
+            Position(RVector::new(
+                0.0,
+                (low + size.y * 0.5) as Real,
+                (reach + 1.0 + size.z * 0.5) as Real,
+            )),
+            LinearVelocity(Vector::NEG_Z * 20.0),
+            SpeculativeCcd::new(1.0),
+        ))
+        .id();
+    app.insert_resource(Pair(cone, block));
+
+    let mut struck = false;
+    let mut coincident = None;
+    for step in 0..30 {
+        let stored: f32 = pair_points(app.world())
+            .iter()
+            .flatten()
+            .map(|point| point.warm_start_normal_impulse)
+            .sum();
+        app.update();
+        let handed = app.world().resource::<Handed>().0;
+        assert!(
+            handed <= stored,
+            "step {step}: the points were handed {handed} N s, the last step's held {stored} N s"
+        );
+        for points in pair_points(app.world()) {
+            for (i, a) in points.iter().enumerate() {
+                for b in &points[..i] {
+                    let apart = a.anchor1.distance(b.anchor1);
+                    if apart < 1e-4 {
+                        coincident
+                            .get_or_insert(format!("step {step}: two points {apart} m apart"));
+                    }
+                }
+            }
+            struck |= points.iter().any(|point| point.normal_impulse > 0.0);
+        }
+    }
+    assert!(struck, "the box never struck the cone");
+    assert_eq!(coincident, None);
+}
+
 #[test]
 fn no_ambiguity_errors() {
     #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
