@@ -88,6 +88,14 @@ impl Plugin for IntegratorPlugin {
                 integrate_positions.in_set(IntegrationSystems::Position),
             ),
         );
+
+        #[cfg(feature = "3d")]
+        app.add_systems(
+            self.schedule.intern(),
+            solve_gyroscopic_motion
+                .in_set(IntegrationSystems::Position)
+                .before(integrate_positions),
+        );
     }
 }
 
@@ -104,7 +112,8 @@ pub enum IntegrationSystems {
     ///
     /// Typically runs in the [`SubstepSchedule`], in [`IntegrationSystems::Velocity`].
     Velocity,
-    /// Moves bodies based on their current velocities and the physics time step.
+    /// Applies the gyroscopic torque to the angular velocities of bodies in 3D, and moves
+    /// bodies based on their current velocities and the physics time step.
     ///
     /// Typically runs in the [`SubstepSchedule`], in [`IntegrationSystems::Position`].
     Position,
@@ -340,10 +349,6 @@ fn clear_velocity_increments(
 pub struct VelocityIntegrationQuery {
     index: &'static SolverBodyIndex,
     integration: &'static mut VelocityIntegrationData,
-    #[cfg(feature = "3d")]
-    angular_inertia: &'static ComputedAngularInertia,
-    #[cfg(feature = "3d")]
-    rotation: &'static Rotation,
 }
 
 /// Integrates the velocities of bodies by applying velocity increments and damping.
@@ -354,12 +359,8 @@ pub fn integrate_velocities(
         (RigidBodyActiveFilter, Without<CustomVelocityIntegration>),
     >,
     mut diagnostics: ResMut<SolverDiagnostics>,
-    #[cfg(feature = "3d")] time: Res<Time>,
 ) {
     let start = crate::utils::Instant::now();
-
-    #[cfg(feature = "3d")]
-    let delta_secs = time.delta_secs();
 
     let access = solver_bodies.access();
 
@@ -379,26 +380,61 @@ pub fn integrate_velocities(
         // Apply velocity increments.
         solver_body.linear_velocity += body.integration.linear_increment;
         solver_body.angular_velocity += body.integration.angular_increment;
-
-        #[cfg(feature = "3d")]
-        {
-            if solver_body.is_gyroscopic() {
-                // TODO: Should this be opt-in with a `GyroscopicMotion` component?
-                // TODO: It's a bit unfortunate that this has to run in the substepping loop
-                //       rather than pre-computing the velocity increments once per time step.
-                //       This needs to be done because the gyroscopic torque relies on up-to-date rotations
-                //       and world-space angular inertia tensors. Omitting the change in orientation would
-                //       lead to worse accuracy and angular momentum not being conserved.
-                let rotation = solver_body.delta_rotation * Rot::from(*body.rotation);
-                solve_gyroscopic_torque(
-                    &mut solver_body.angular_velocity,
-                    rotation,
-                    body.angular_inertia,
-                    delta_secs,
-                );
-            }
-        }
     });
+
+    diagnostics.integrate_velocities += start.elapsed();
+}
+
+/// Applies the gyroscopic torque over the substep to the angular velocities of bodies,
+/// right before [`integrate_positions`] turns them with those velocities.
+///
+/// The gyroscopic torque accounts for the world-space angular inertia turning with the body,
+/// so it must use the angular velocity the body is turned with in the substep. That is the
+/// velocity after the constraint solve, which changes it by the constraints' impulses and the
+/// velocity that pushes overlaps apart. Applied before the solve instead, the torque misses
+/// the turn those changes make, and a spinning body in contact gains or loses angular momentum
+/// that no impulse gave it.
+#[cfg(feature = "3d")]
+pub fn solve_gyroscopic_motion(
+    mut solver_bodies: ResMut<SolverBodies>,
+    bodies: Query<
+        (&SolverBodyIndex, &ComputedAngularInertia, &Rotation),
+        (RigidBodyActiveFilter, Without<CustomVelocityIntegration>),
+    >,
+    mut diagnostics: ResMut<SolverDiagnostics>,
+    time: Res<Time>,
+) {
+    let start = crate::utils::Instant::now();
+
+    let delta_secs = time.delta_secs();
+
+    let access = solver_bodies.access();
+
+    bodies.par_for_each(
+        MIN_PAR_ITER_ENTITIES,
+        |(index, angular_inertia, rotation)| {
+            // SAFETY: Each entity has a unique solver body index, so the accessed bodies are disjoint.
+            let solver_body = unsafe { access.body_unchecked_mut(*index) };
+
+            if solver_body.flags.is_kinematic() || !solver_body.is_gyroscopic() {
+                return;
+            }
+
+            // TODO: Should this be opt-in with a `GyroscopicMotion` component?
+            // TODO: It's a bit unfortunate that this has to run in the substepping loop
+            //       rather than pre-computing the velocity increments once per time step.
+            //       This needs to be done because the gyroscopic torque relies on up-to-date rotations
+            //       and world-space angular inertia tensors. Omitting the change in orientation would
+            //       lead to worse accuracy and angular momentum not being conserved.
+            let rotation = solver_body.delta_rotation * Rot::from(*rotation);
+            solve_gyroscopic_torque(
+                &mut solver_body.angular_velocity,
+                rotation,
+                angular_inertia,
+                delta_secs,
+            );
+        },
+    );
 
     diagnostics.integrate_velocities += start.elapsed();
 }

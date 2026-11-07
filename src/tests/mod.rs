@@ -255,6 +255,83 @@ fn box_held_by_friction_on_slope_does_not_creep() {
     );
 }
 
+/// A cylinder spinning on one rim edge on frictionless ground, tilted 38°, keeps the vertical
+/// component of its angular momentum about its centre of mass: gravity acts at its centre of mass
+/// and the contact pushes straight up, so neither has a moment about the vertical through it.
+///
+/// The contact's impulse and the velocity that pushes its overlap apart change the angular
+/// velocity in each substep before the body is turned with it. The gyroscopic torque must use
+/// that angular velocity: applied with the one from before the solve, it missed the turn those
+/// changes make, and the cylinder gained 11% of its vertical angular momentum in 2 s. Now it
+/// loses 0.2%, from the step's discretization: the contact supports the cylinder in the first
+/// substeps of each step, as the point it was found at turns away from the ground. The bound
+/// is 1%.
+#[cfg(all(feature = "3d", feature = "default-collider"))]
+#[test]
+fn spinning_cylinder_on_frictionless_ground_keeps_vertical_angular_momentum() {
+    use crate::physics_transform::PhysicsTransformConfig;
+
+    const HZ: f64 = 120.0;
+    const RADIUS: f32 = 0.29;
+    const HEIGHT: f32 = 0.88;
+    let inertia = Vec3::new(2.4005, 1.3262, 2.4005);
+
+    let mut app = create_app();
+    app.insert_resource(PhysicsTransformConfig {
+        transform_to_position: false,
+        ..default()
+    })
+    .insert_resource(Time::<Fixed>::from_hz(HZ))
+    .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+        1.0 / HZ,
+    )));
+
+    app.world_mut().spawn((
+        RigidBody::Static,
+        Collider::cuboid(40.0, 1.0, 40.0),
+        Position(RVector::NEG_Y * 0.5),
+        Friction::ZERO,
+    ));
+    // Tilted 38°, spinning about its axis at 30 rad/s, its lowest rim point on the ground.
+    let rotation = Quat::from_rotation_z((90.0f32 - 38.0).to_radians());
+    let axis = rotation * Vec3::Y;
+    let down = (Vec3::NEG_Y - axis * axis.dot(Vec3::NEG_Y)).normalize();
+    let contact = -axis * HEIGHT * 0.5 + down * RADIUS;
+    let body = app
+        .world_mut()
+        .spawn((
+            RigidBody::Dynamic,
+            Collider::cylinder(RADIUS, HEIGHT),
+            Mass(18.0),
+            AngularInertia::new(inertia),
+            CenterOfMass(Vec3::ZERO),
+            Position(RVector::Y * -contact.y as Real),
+            Rotation(rotation),
+            AngularVelocity(axis * 30.0),
+            Friction::ZERO,
+            SleepingDisabled,
+        ))
+        .id();
+
+    let vertical_momentum = |app: &App| {
+        let rotation = app.world().get::<Rotation>(body).unwrap().0;
+        let angular = app.world().get::<AngularVelocity>(body).unwrap().0;
+        let world_inertia = Mat3::from_quat(rotation)
+            * Mat3::from_diagonal(inertia)
+            * Mat3::from_quat(rotation).transpose();
+        (world_inertia * angular).y
+    };
+    let start = vertical_momentum(&app);
+    for _ in 0..2 * HZ as usize {
+        app.update();
+    }
+    let drift = vertical_momentum(&app) - start;
+    assert!(
+        drift.abs() < 0.01 * start,
+        "the vertical angular momentum moved from {start:.4} by {drift:.4} N m s in 2 s"
+    );
+}
+
 /// A box that falls asleep on a slab, and is woken with the slab taken away, falls freely from rest
 /// in its first awake step: its velocity changes by one step's gravity, g Δt, and no more.
 ///
