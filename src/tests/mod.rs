@@ -260,12 +260,13 @@ fn box_held_by_friction_on_slope_does_not_creep() {
 /// and the contact pushes straight up, so neither has a moment about the vertical through it.
 ///
 /// The contact's impulse and the velocity that pushes its overlap apart change the angular
-/// velocity in each substep before the body is turned with it. The gyroscopic torque must use
-/// that angular velocity: applied with the one from before the solve, it missed the turn those
-/// changes make, and the cylinder gained 11% of its vertical angular momentum in 2 s. Now it
-/// loses 0.2%, from the step's discretization: the contact supports the cylinder in the first
-/// substeps of each step, as the point it was found at turns away from the ground. The bound
-/// is 1%.
+/// velocity in each substep before the body is turned with it, so the gyroscopic torque must be
+/// applied with that angular velocity. Applied with the one from before the solve, it misses the
+/// turn those changes make, and the cylinder gains 7 to 11% of its vertical angular momentum in
+/// 2 s (at 48 to 6 substeps). What remains is the integration's own error, as the contact's
+/// normal stays vertical: 0.2% in 2 s at the default 6 substeps, under 0.1% at 12 to 48. The
+/// bound, 1%, lies between the two: five times that residual, a seventh of the least error it
+/// catches.
 #[cfg(all(feature = "3d", feature = "default-collider"))]
 #[test]
 fn spinning_cylinder_on_frictionless_ground_keeps_vertical_angular_momentum() {
